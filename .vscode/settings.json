@@ -2,5 +2,7 @@
     "files.insertFinalNewline": true,
     "files.encoding": "utf8",
     "editor.tabSize": 4,
-    "editor.useTabStops": false
+    "editor.useTabStops": false,
+    "files.eol": "\r\n",
+    "editor.rulers": [100]
 }
