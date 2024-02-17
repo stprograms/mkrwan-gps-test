@@ -1,0 +1,6 @@
+{
+    "files.insertFinalNewline": true,
+    "files.encoding": "utf8",
+    "editor.tabSize": 4,
+    "editor.useTabStops": false
+}
