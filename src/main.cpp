@@ -2,15 +2,33 @@
 #include <Arduino_MKRGPS.h>
 #include <Arduino_PMIC.h>
 #include <ArduinoLowPower.h>
+#include <RTCZero.h>
 
 #include "../lib/LoraWanSender/include/LoraWanSender.hpp"
 #include "secrets.h"
 
-LoRaModem modem;
+enum SystemState
+{
+    FETCH_DATA,
+    UPLOAD_DATA,
+    SLEEP
+};
+
+SystemState current_state;
 LoraWanSender *sender;
+uint32_t counter;
+uint8_t satellites;
 
 /// @brief update interval in seconds
 const int UPDATE_INTERVAL = (60 * 60);
+
+static void configurePMIC();
+static void fetchData();
+static void uploading();
+static void sleeping();
+static void gotoFetchData();
+static void gotoSleep();
+static void gotoUploading();
 
 void setup()
 {
@@ -22,60 +40,9 @@ void setup()
     //     delay(100);
     // }
 
-    if (!PMIC.begin())
-    {
-        Serial.println("Failed to initialize PMIC!");
-        while (1)
-            ;
-    }
+    configurePMIC();
 
-    // Set the input current limit to 2 A and the overload input voltage to 3.88 V
-    if (!PMIC.setInputCurrentLimit(2.0))
-    {
-        Serial.println("Error in set input current limit");
-    }
-
-    if (!PMIC.setInputVoltageLimit(3.88))
-    {
-        Serial.println("Error in set input voltage limit");
-    }
-
-    // set the minimum voltage used to feeding the module embed on Board
-    if (!PMIC.setMinimumSystemVoltage(3.5))
-    {
-        Serial.println("Error in set minimum system volage");
-    }
-
-    // Set the desired charge voltage to 4.11 V
-    if (!PMIC.setChargeVoltage(4.2))
-    {
-        Serial.println("Error in set charge voltage");
-    }
-
-    // Set the charge current to 375 mA
-    // the charge current should be defined as maximum at (C for hour)/2h
-    // to avoid battery explosion (for example for a 750 mAh battery set to 0.375 A)
-    if (!PMIC.setChargeCurrent(0.375))
-    {
-        Serial.println("Error in set charge current");
-    }
-
-    SERIAL_PORT_HARDWARE_OPEN.print("Charge status: ");
-    SERIAL_PORT_HARDWARE_OPEN.println(PMIC.chargeStatus());
-
-    if (!PMIC.enableCharge())
-    {
-        Serial.println(F("Failed to enable charging"));
-    }
-
-    if (!PMIC.canRunOnBattery())
-    {
-        SERIAL_PORT_HARDWARE_OPEN.println("Can run on battery");
-    }
-    PMIC.end();
     SERIAL_PORT_HARDWARE_OPEN.println("Initialization done!");
-
-    SERIAL_PORT_HARDWARE_OPEN.write("Starting echo:\r\n");
 
     // If you are using the MKR GPS as shield, change the next line to pass
     // the GPS_MODE_SHIELD parameter to the GPS.begin(...)
@@ -85,21 +52,56 @@ void setup()
         while (1)
             ;
     }
+    // configure LED
+    pinMode(LED_BUILTIN, OUTPUT);
 
     sender = new LoraWanSender(SECRET_APP_EUI, SECRET_APP_KEY);
-    pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, HIGH);
+    gotoFetchData();
 }
 
 void loop()
 {
+    switch (current_state)
+    {
+    case FETCH_DATA:
+        fetchData();
+        break;
+
+    case UPLOAD_DATA:
+        uploading();
+        break;
+
+    case SLEEP:
+        sleeping();
+        break;
+    }
+}
+
+static void fetchData()
+{
+    uint32_t now = millis();
+
+    if (now - counter > (5 * 60 * 1000))
+    {
+        if (satellites != 0)
+        {
+            gotoUploading();
+        }
+        else
+        {
+            // fetch data timeout -> go to sleep
+            gotoSleep();
+        }
+        return;
+    }
+
     if (GPS.available())
     {
         // read GPS values
         float latitude = GPS.latitude();
         float longitude = GPS.longitude();
         float altitude = GPS.altitude();
-        int satellites = GPS.satellites();
+        satellites = (uint8_t)GPS.satellites();
 
         // print GPS values
         Serial.println();
@@ -118,14 +120,116 @@ void loop()
         Serial.println();
 
         sender->setGps(GPS.latitude(), GPS.longitude(), GPS.satellites(), GPS.altitude());
+    }
 
-        sender->send();
-        sender->read();
+    if (satellites >= 10)
+    {
+        gotoUploading();
+    }
+}
 
-        // wait for 1 hour
-        digitalWrite(LED_BUILTIN, LOW);
-        LowPower.deepSleep(/*UPDATE_INTERVAL*/ 5 * 
-        60 * 1000);
-        digitalWrite(LED_BUILTIN, HIGH);
+static void uploading()
+{
+    sender->send();
+    sender->read();
+
+    gotoSleep();
+}
+
+static void sleeping()
+{
+
+    // Send GPS to sleep
+    GPS.standby();
+
+    // wait for UPDATE_INTERVAL
+    digitalWrite(LED_BUILTIN, LOW);
+    LowPower.deepSleep(UPDATE_INTERVAL * 1000);
+
+    // woke up again
+    digitalWrite(LED_BUILTIN, HIGH);
+
+    GPS.wakeup();
+
+    // Continue with fetching data
+    gotoFetchData();
+}
+
+static void gotoSleep()
+{
+    Serial.println(F("Goto Sleep"));
+    current_state = SLEEP;
+
+    digitalWrite(LED_BUILTIN, LOW);
+}
+
+static void gotoFetchData()
+{
+    Serial.println(F("Goto Fetch Data"));
+    current_state = FETCH_DATA;
+    counter = millis();
+    satellites = 0;
+
+    digitalWrite(LED_BUILTIN, HIGH);
+}
+
+static void gotoUploading()
+{
+    Serial.println(F("Goto Uploading"));
+    current_state = UPLOAD_DATA;
+}
+
+static void configurePMIC()
+{
+    if (PMIC.begin())
+    {
+        // Set the input current limit to 2 A and the overload input voltage to 3.88 V
+        if (!PMIC.setInputCurrentLimit(2.0))
+        {
+            Serial.println("Error in set input current limit");
+        }
+
+        if (!PMIC.setInputVoltageLimit(3.88))
+        {
+            Serial.println("Error in set input voltage limit");
+        }
+
+        // set the minimum voltage used to feeding the module embed on Board
+        if (!PMIC.setMinimumSystemVoltage(3.5))
+        {
+            Serial.println("Error in set minimum system volage");
+        }
+
+        // Set the desired charge voltage to 4.11 V
+        if (!PMIC.setChargeVoltage(4.2))
+        {
+            Serial.println("Error in set charge voltage");
+        }
+
+        // Set the charge current to 375 mA
+        // the charge current should be defined as maximum at (C for hour)/2h
+        // to avoid battery explosion (for example for a 750 mAh battery set to 0.375 A)
+        if (!PMIC.setChargeCurrent(0.375))
+        {
+            Serial.println("Error in set charge current");
+        }
+
+        SERIAL_PORT_HARDWARE_OPEN.print("Charge status: ");
+        SERIAL_PORT_HARDWARE_OPEN.println(PMIC.chargeStatus());
+
+        if (!PMIC.enableCharge())
+        {
+            Serial.println(F("Failed to enable charging"));
+        }
+
+        if (!PMIC.canRunOnBattery())
+        {
+            SERIAL_PORT_HARDWARE_OPEN.println("Can run on battery");
+        }
+        PMIC.end();
+    }
+    else
+    {
+        Serial.println("Failed to initialize PMIC!");
     }
 }
